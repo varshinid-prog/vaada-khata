@@ -9,6 +9,8 @@
   amounts and proposal ids are never logged.
 """
 import json
+from contextvars import ContextVar
+from contextlib import contextmanager
 import logging
 import re
 import socket
@@ -25,6 +27,20 @@ from .errors import (LedgerBadResponse, LedgerConflict, LedgerHTTPError, LedgerN
 
 log = logging.getLogger("vaada.ledger_api")
 
+# Per-request authorization. ContextVar prevents one merchant's token
+# from leaking into another concurrent request.
+_ledger_authorization = ContextVar("ledger_authorization", default=None)
+
+
+@contextmanager
+def use_ledger_authorization(value):
+    token = _ledger_authorization.set(value)
+    try:
+        yield
+    finally:
+        _ledger_authorization.reset(token)
+
+
 # transport(method, url, body_bytes_or_None, timeout_s, max_bytes) -> (status_code, response_bytes)
 Transport = Callable[[str, str, Optional[bytes], float, int], Tuple[int, bytes]]
 
@@ -38,6 +54,9 @@ def urllib_transport(method: str, url: str, body: Optional[bytes], timeout: floa
     headers = {"Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
+    authorization = _ledger_authorization.get()
+    if authorization:
+        headers["Authorization"] = authorization
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

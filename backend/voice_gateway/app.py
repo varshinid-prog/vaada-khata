@@ -10,6 +10,7 @@ Run (from backend/):  uvicorn voice_gateway.app:app --host 0.0.0.0 --port 8100  
 """
 import base64
 import io
+import hashlib
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ from pydantic import BaseModel, Field
 from dialogue import DialogueManager
 from dialogue import models as M
 from ledger_api import LedgerAPIClient, LedgerAPIConfig
+from ledger_api.client import use_ledger_authorization
 from ledger_api.adapter import LedgerAdapter
 from voice_auth.api import get_voice_auth, router as voice_auth_router
 from voice_auth.service import VoiceAuthService
@@ -42,6 +44,7 @@ log = logging.getLogger("vaada.gateway")
 
 SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 MSG_ID_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,100}$")
+_session_merchant: Dict[str, str] = {}
 MAX_AUDIO_BYTES = int(os.environ.get("VAADA_MAX_AUDIO_BYTES") or 5_000_000)
 MAX_AUDIO_SECONDS = 30.0                                         # Gnani REST limit
 UNCLEAR_REPLY = "Awaaz samajh nahi aayi, dobara bolein."
@@ -55,9 +58,10 @@ SPOKEN = {                                                        # short Hindi-
     "STT_NOT_CONFIGURED": "Awaaz service set nahi hai.",
     "STT_BAD_RESPONSE": "Awaaz samajh nahi aayi, dobara bolein.",
     "INTERNAL": "Kuch gadbad ho gayi. Dobara try karein.",
+    "MERCHANT_AUTH_REQUIRED": "Pehle app mein login karein.",
     "AUTH_REQUIRED": "Pehle awaaz se verify karein.",       # only when VAADA_VOICE_AUTH_MODE=enforce
 }
-HTTP_STATUS = {"AUTH_REQUIRED": 401, "BAD_REQUEST": 422, "BAD_AUDIO": 400, "AUDIO_TOO_LARGE": 413, "STT_TIMEOUT": 504,
+HTTP_STATUS = {"MERCHANT_AUTH_REQUIRED": 401, "AUTH_REQUIRED": 401, "BAD_REQUEST": 422, "BAD_AUDIO": 400, "AUDIO_TOO_LARGE": 413, "STT_TIMEOUT": 504,
                "STT_UNAVAILABLE": 503, "STT_RATE_LIMITED": 429, "STT_AUTH": 502, "STT_NOT_CONFIGURED": 503,
                "STT_BAD_RESPONSE": 502, "INTERNAL": 500}
 
@@ -229,6 +233,56 @@ def _usable(text: str) -> bool:
     return len(re.sub(r"[\W_]+", "", text, flags=re.UNICODE)) >= 2
 
 
+
+
+def _voice_customer_create_name(text: str) -> Optional[str]:
+    """Return a name only for an explicit spoken create-customer command."""
+    value = re.sub(r"[!?.,;]+", " ", (text or "").strip())
+    value = re.sub(r"\s+", " ", value).strip()
+    patterns = [
+        r"^(.{1,80}?)\s+naam\s+ka\s+(?:ek\s+)?(?:naya\s+)?customer\s+(?:naya\s+wala\s+)?(?:banao|bana\s+do|create\s+karo|add\s+karo)$",
+        r"^(.{1,80}?)\s+naam\s+ki\s+(?:ek\s+)?(?:nayi\s+)?customer\s+(?:banao|bana\s+do)$",
+        r"^(?:naya\s+)?customer\s+(?:banao|bana\s+do)\s+(.{1,80})$",
+        r"^(?:create|add)\s+(?:a\s+)?(?:new\s+)?customer\s+(?:named\s+)?(.{1,80})$",
+        r"^(.{1,80})\s+naam\s+ka\s+customer\s+(?:banao|bana\s+do)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, value, flags=re.IGNORECASE)
+        if match:
+            name = match.group(1).strip(" \t-'")
+            if name and len(name) <= 80 and not re.search(r"\d", name):
+                return name
+    return None
+
+
+def _create_customer_voice_reply(services: "Services", session_id: str, transcript: str,
+                                 language_code: Optional[str], customer_name: str,
+                                 want_audio: bool) -> VoiceTurnResponse:
+    """Create only after explicit user wording; never create for an ordinary transaction request."""
+    client = services.adapter._client
+    lookup = client.lookup_customer(customer_name)
+    if lookup.status == "EXACT_MATCH" and lookup.customer is not None:
+        spoken = f"{lookup.customer.name} pehle se customer list mein hai."
+        kind = "CUSTOMER_ALREADY_EXISTS"
+    elif lookup.status == "AMBIGUOUS_MATCH":
+        spoken = lookup.clarification_prompt or f"{customer_name} naam ke kai customers mile. Kripya poora naam batayein."
+        kind = "CUSTOMER_NEEDS_CLARIFICATION"
+    elif lookup.status == "NOT_FOUND":
+        created = client.create_customer(customer_name)
+        services.adapter.invalidate_customers()
+        spoken = f"{created.name} naya customer successfully add ho gaya."
+        kind = "CUSTOMER_CREATED"
+    else:
+        raise RuntimeError("Unexpected customer lookup status")
+    return VoiceTurnResponse(
+        status="ok", session_id=session_id,
+        transcript=Transcript(text=transcript, language_code=language_code),
+        reply=Reply(text=spoken, speak=[spoken], kind=kind),
+        dialogue=Dialogue(state="IDLE", awaiting=None, pending=None),
+        ledger=None, duplicate=False, audio=_speak(services, [spoken], want_audio))
+
+
+
 def _speak(services: "Services", speak: List[str], want_audio: bool) -> AudioOut:
     """Turn the FINAL reply text into audio. Runs strictly AFTER the dialogue/ledger work is finished, never raises, and has no
     way to influence a ledger action: it only reads text. Nothing about the text or audio is logged.
@@ -292,6 +346,7 @@ def voice_turn(
     x_voice_auth_token: Optional[str] = Header(None, description="Voice-authentication token from POST /v1/auth/verify. "
                                                                   "Only checked when the gateway runs with "
                                                                   "VAADA_VOICE_AUTH_MODE=enforce; ignored otherwise."),
+    authorization: Optional[str] = Header(None, description="Merchant login bearer token from /auth/login or /auth/register."),
     services: Services = Depends(get_services),
     auth: VoiceAuthService = Depends(get_voice_auth),
 ):
@@ -299,6 +354,14 @@ def voice_turn(
     want_audio = (x_voice_want_audio or "true").strip().lower() not in ("0", "false", "no", "off")
     if not SESSION_RE.match(session_id or ""):
         raise GatewayError("BAD_REQUEST", "session_id must be 1-64 chars of A-Z a-z 0-9 _ -")
+    if not authorization or not authorization.strip().lower().startswith("bearer "):
+        raise GatewayError("MERCHANT_AUTH_REQUIRED", "merchant login required")
+    merchant_token = authorization.strip()
+    merchant_fingerprint = hashlib.sha256(merchant_token.encode()).hexdigest()
+    previous_merchant = _session_merchant.get(session_id)
+    if previous_merchant is not None and previous_merchant != merchant_fingerprint:
+        services.manager.end_session(session_id)
+    _session_merchant[session_id] = merchant_fingerprint
     if auth.enforcing:                       # authentication gate: before STT, dialogue or any ledger call
         account = auth.authorize(x_voice_auth_token, session_id)        # server-side lookup; the client cannot assert it
         if account is None:
@@ -337,9 +400,15 @@ def voice_turn(
                                  audio=_speak(services, [spoken], want_audio))
 
     try:
-        result = services.manager.process_text(
-            session_id, stt.text, known_customers=services.adapter.known_customers(), today=date.today(),
-            message_id=client_msg_id)
+        with use_ledger_authorization(merchant_token):
+            create_name = _voice_customer_create_name(stt.text)
+            if create_name:
+                return _create_customer_voice_reply(
+                    services, session_id, stt.text, stt.language_code, create_name, want_audio)
+            known_customers = services.adapter.known_customers()
+            result = services.manager.process_text(
+                session_id, stt.text, known_customers=known_customers, today=date.today(),
+                message_id=client_msg_id)
     except Exception as exc:                         # the manager is built not to raise; never leak internals if it does
         log.error("voice turn: dialogue failed (%s)", type(exc).__name__)
         raise GatewayError("INTERNAL", "dialogue failed", recoverable=True) from None

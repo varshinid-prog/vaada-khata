@@ -57,6 +57,10 @@ sealed interface KhataUiState {
 sealed interface AuthState {
     data object Unauthenticated : AuthState
     data object Authenticated : AuthState
+    /** Validating a stored session on app start. */
+    data object Restoring : AuthState
+    /** Language choice; [canGoBack] when reached from Settings. */
+    data class LanguageSelect(val canGoBack: Boolean = false) : AuthState
     data class PhoneEntry(val phone: String = "", val error: String? = null, val loading: Boolean = false) : AuthState
     data class OtpEntry(val phone: String, val otp: String = "", val error: String? = null, val loading: Boolean = false) : AuthState
     data class SignupEntry(val phone: String, val merchantName: String = "", val shopName: String = "", val error: String? = null, val loading: Boolean = false) : AuthState

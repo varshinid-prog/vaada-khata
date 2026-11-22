@@ -28,12 +28,6 @@ class AudioCaptureManager(private val context: Context) {
         const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 
-        // Silence & Endpointing thresholds (Adaptive for noisy kirana shop)
-        private const val MIN_SPEECH_DURATION_MS = 600L      // Must speak for at least 600ms before silence triggers
-        private const val SILENCE_TIMEOUT_MS = 1400L         // 1.4s of trailing silence completes the utterance
-        private const val MAX_RECORDING_DURATION_MS = 8000L  // 8.0s hard safety cap
-        private const val BASE_SPEECH_THRESHOLD = 0.015f     // Minimum baseline speech RMS threshold
-        private const val NOISE_MARGIN_RMS = 0.015f          // Required elevation above estimated ambient noise floor
     }
 
     private var audioRecord: AudioRecord? = null
@@ -44,11 +38,14 @@ class AudioCaptureManager(private val context: Context) {
     var onCaptureCompleted: ((AudioCaptureMetadata, File?) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    /** Endpointing parameters used for the next capture (diagnostics can change them). */
+    @Volatile var endpointConfig: EndpointConfig = EndpointConfig()
+
     val isCapturing: Boolean
         get() = isRecording.get()
 
     @SuppressLint("MissingPermission")
-    fun startCapture(scope: CoroutineScope, handoffStartTimeMs: Long? = null) {
+    fun startCapture(scope: CoroutineScope, handoffStartTimeMs: Long? = null, preRoll: ShortArray? = null) {
         val tCaptureInitStart = System.currentTimeMillis()
         if (isRecording.get()) {
             Log.w(TAG, "Capture already in progress")
@@ -84,6 +81,12 @@ class AudioCaptureManager(private val context: Context) {
 
             val tBeforeStart = System.currentTimeMillis()
             audioRecord?.startRecording()
+            if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                // another app (a call, another recorder) holds the microphone
+                releaseAudioRecord()
+                onError?.invoke("Microphone is busy or unavailable")
+                return
+            }
             val tRecordStarted = System.currentTimeMillis()
             isRecording.set(true)
 
@@ -93,7 +96,7 @@ class AudioCaptureManager(private val context: Context) {
             )
 
             recordingJob = scope.launch(Dispatchers.IO) {
-                runCaptureLoop(bufferSize, handoffStartTimeMs, tRecordStarted)
+                runCaptureLoop(bufferSize, handoffStartTimeMs, tRecordStarted, preRoll, endpointConfig)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start AudioRecord capture", e)
@@ -103,139 +106,95 @@ class AudioCaptureManager(private val context: Context) {
         }
     }
 
-    private fun runCaptureLoop(bufferSize: Int, handoffStartTimeMs: Long? = null, tRecordStarted: Long = 0L) {
-        val audioData = ShortArray(bufferSize / 2)
-        val byteStream = ByteArrayOutputStream()
+    private fun runCaptureLoop(
+        bufferSize: Int, handoffStartTimeMs: Long?, tRecordStarted: Long, preRoll: ShortArray?, cfg: EndpointConfig
+    ) {
+        val frame = ShortArray(bufferSize / 2)
+        val pcm = ByteArrayOutputStream()
+        val endpointer = Endpointer(cfg)
         val startTime = System.currentTimeMillis()
-        var lastSpeechTime = startTime
-        var speechDetected = false
         var maxAmplitude = 0
-        var totalSquareSum = 0.0
+        var squareSum = 0.0
         var totalSamples = 0L
-        var isFirstFrame = true
+        var firstFrame = true
+        var reason = EndReason.STOPPED
 
-        // Adaptive ambient noise floor tracker
-        var estimatedNoiseFloor = BASE_SPEECH_THRESHOLD
-        var frameCount = 0
+        // Feeds one block of PCM to the buffer, the level meter and the endpointer. Returns the reason to stop, if any.
+        fun consume(buf: ShortArray, n: Int): EndReason? {
+            var sq = 0.0
+            for (i in 0 until n) {
+                val v = buf[i].toInt()
+                if (Math.abs(v) > maxAmplitude) maxAmplitude = Math.abs(v)
+                sq += v.toDouble() * v
+                pcm.write(v and 0xFF); pcm.write((v shr 8) and 0xFF)
+            }
+            squareSum += sq; totalSamples += n
+            val rms = min((sqrt(sq / n) / 32767.0).toFloat(), 1f)
+            onAmplitudeUpdate?.invoke(rms)
+            return endpointer.onFrame(rms, n * 1000L / SAMPLE_RATE)
+        }
 
         try {
+            // Audio that arrived after the wake word fired but before this recorder existed (see WakeWordDetector.audioSinceTrigger).
+            if (preRoll != null && preRoll.isNotEmpty()) {
+                var off = 0
+                while (off < preRoll.size) {
+                    val n = min(frame.size, preRoll.size - off)
+                    System.arraycopy(preRoll, off, frame, 0, n)
+                    consume(frame, n)?.let { /* a tail alone never ends a capture */ }
+                    off += n
+                }
+                Log.i(TAG, "Pre-roll prepended: ${preRoll.size * 1000L / SAMPLE_RATE} ms")
+            }
             while (isRecording.get()) {
-                val now = System.currentTimeMillis()
-                val elapsedMs = now - startTime
-
-                // Hard safety timeout
-                if (elapsedMs >= MAX_RECORDING_DURATION_MS) {
-                    Log.i(TAG, "Capture reached MAX_RECORDING_DURATION_MS ($MAX_RECORDING_DURATION_MS ms). Stopping.")
+                val read = audioRecord?.read(frame, 0, frame.size) ?: AudioRecord.ERROR_INVALID_OPERATION
+                if (read < 0) {   // ERROR_INVALID_OPERATION, ERROR_BAD_VALUE, ERROR_DEAD_OBJECT, ERROR: never spin on a dead recorder
+                    Log.e(TAG, "AudioRecord.read failed with code $read")
+                    reason = EndReason.ERROR
                     break
                 }
-
-                val readShorts = audioRecord?.read(audioData, 0, audioData.size) ?: -1
-                if (readShorts > 0) {
-                    if (isFirstFrame) {
-                        isFirstFrame = false
-                        val tFirstAudioRead = System.currentTimeMillis()
-                        val recordToReadMs = if (tRecordStarted > 0) tFirstAudioRead - tRecordStarted else 0L
-                        if (handoffStartTimeMs != null) {
-                            val totalHandoffMs = tFirstAudioRead - handoffStartTimeMs
-                            Log.i(
-                                "HandoffProfiler",
-                                ">>> HANDOFF METRICS COMPLETE: T0->T4 Total = ${totalHandoffMs}ms (RecordStart->FirstRead: ${recordToReadMs}ms, Frame: ${readShorts} samples) <<<"
-                            )
-                        } else {
-                            Log.i("HandoffProfiler", "PTT First audio frame read in ${recordToReadMs}ms (${readShorts} samples)")
-                        }
+                if (read == 0) continue
+                if (firstFrame) {
+                    firstFrame = false
+                    val tFirst = System.currentTimeMillis()
+                    val recordToRead = if (tRecordStarted > 0) tFirst - tRecordStarted else 0L
+                    if (handoffStartTimeMs != null) {
+                        Log.i("HandoffProfiler", ">>> HANDOFF: wake->first audio = ${tFirst - handoffStartTimeMs} ms (record start->first read ${recordToRead} ms)")
+                    } else {
+                        Log.i("HandoffProfiler", "PTT first audio frame in ${recordToRead} ms")
                     }
-
-                    var chunkSquareSum = 0.0
-                    for (i in 0 until readShorts) {
-                        val sample = audioData[i]
-                        val absSample = Math.abs(sample.toInt())
-                        if (absSample > maxAmplitude) {
-                            maxAmplitude = absSample
-                        }
-                        chunkSquareSum += (sample * sample)
-
-                        // Convert short to little-endian bytes for PCM stream
-                        byteStream.write(sample.toInt() and 0xFF)
-                        byteStream.write((sample.toInt() shr 8) and 0xFF)
-                    }
-
-                    totalSquareSum += chunkSquareSum
-                    totalSamples += readShorts
-
-                    val chunkRms = sqrt(chunkSquareSum / readShorts).toFloat()
-                    val normalizedRms = min(chunkRms / 32767f, 1.0f)
-                    onAmplitudeUpdate?.invoke(normalizedRms)
-
-                    // Adaptive ambient noise floor estimation
-                    frameCount++
-                    if (frameCount <= 3) {
-                        estimatedNoiseFloor = if (frameCount == 1) normalizedRms else min(estimatedNoiseFloor, normalizedRms)
-                    } else if (normalizedRms < estimatedNoiseFloor) {
-                        estimatedNoiseFloor = estimatedNoiseFloor * 0.85f + normalizedRms * 0.15f
-                    } else if (!speechDetected) {
-                        estimatedNoiseFloor = estimatedNoiseFloor * 0.995f + normalizedRms * 0.005f
-                    }
-
-                    val adaptiveSpeechThreshold = max(BASE_SPEECH_THRESHOLD, estimatedNoiseFloor + NOISE_MARGIN_RMS)
-
-                    // Voice Activity Detection & Endpointing logic
-                    if (normalizedRms >= adaptiveSpeechThreshold) {
-                        speechDetected = true
-                        lastSpeechTime = now
-                    } else if (speechDetected) {
-                        val silenceDurationMs = now - lastSpeechTime
-                        val spokenDurationMs = now - startTime
-                        if (silenceDurationMs >= SILENCE_TIMEOUT_MS && spokenDurationMs >= MIN_SPEECH_DURATION_MS) {
-                            Log.i(
-                                TAG,
-                                "Silence endpoint detected ($silenceDurationMs ms silence after speech; noise floor=%.4f, thresh=%.4f). Stopping capture.".format(
-                                    estimatedNoiseFloor,
-                                    adaptiveSpeechThreshold
-                                )
-                            )
-                            break
-                        }
-                    }
-                } else if (readShorts == AudioRecord.ERROR_INVALID_OPERATION) {
-                    Log.e(TAG, "AudioRecord read returned ERROR_INVALID_OPERATION")
-                    break
                 }
+                val end = consume(frame, read)
+                if (end != null) { reason = end; break }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception during audio capture loop", e)
+            reason = EndReason.ERROR
         } finally {
-            val durationMs = System.currentTimeMillis() - startTime
-            val finalBytes = byteStream.toByteArray()
-            val avgRms = if (totalSamples > 0) {
-                (sqrt(totalSquareSum / totalSamples) / 32767.0).toFloat()
-            } else {
-                0f
-            }
-
-            // Save utterance to local cache file for inspection
-            val outputFile = try {
-                val file = File(context.cacheDir, "last_utterance.pcm")
-                FileOutputStream(file).use { it.write(finalBytes) }
-                file
+            val bytes = pcm.toByteArray()
+            val speech = endpointer.speechDetected
+            val avgRms = if (totalSamples > 0) (sqrt(squareSum / totalSamples) / 32767.0).toFloat() else 0f
+            Log.i(
+                TAG,
+                "Capture end: reason=$reason speech=$speech speechStart=${endpointer.speechStartedAtMs}ms voiced=${endpointer.voicedMs}ms " +
+                    "total=${endpointer.elapsedMs}ms noiseFloor=%.4f threshold=%.4f peak=$maxAmplitude avgRms=%.4f".format(
+                        endpointer.noiseFloor, endpointer.threshold, avgRms)
+            )
+            // Only a recording that really contains speech is written out and handed on; silence is never uploaded.
+            val outputFile = if (speech && reason != EndReason.ERROR) try {
+                File(context.cacheDir, "last_utterance.pcm").also { f -> FileOutputStream(f).use { it.write(bytes) } }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to persist PCM utterance to cache file", e)
-                null
-            }
+                Log.w(TAG, "Failed to persist PCM utterance to cache file", e); null
+            } else null
 
             val metadata = AudioCaptureMetadata(
-                sampleRate = SAMPLE_RATE,
-                channels = 1,
-                audioFormat = "PCM_16BIT",
-                durationMs = durationMs,
-                totalBytes = finalBytes.size,
-                maxAmplitude = maxAmplitude,
-                averageRms = avgRms
+                sampleRate = SAMPLE_RATE, channels = 1, audioFormat = "PCM_16BIT",
+                durationMs = endpointer.elapsedMs, totalBytes = bytes.size, maxAmplitude = maxAmplitude, averageRms = avgRms,
+                endReason = reason.name, speechDetected = speech, speechStartMs = endpointer.speechStartedAtMs,
+                noiseFloor = endpointer.noiseFloor, speechThreshold = endpointer.threshold
             )
-
             isRecording.set(false)
             releaseAudioRecord()
-
             onCaptureCompleted?.invoke(metadata, outputFile)
         }
     }

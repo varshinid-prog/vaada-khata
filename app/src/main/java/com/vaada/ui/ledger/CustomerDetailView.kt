@@ -1,5 +1,7 @@
 package com.vaada.ui.ledger
 
+import com.vaada.models.tr
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -85,7 +87,7 @@ fun CustomerDetailView(
                 IconButton(onClick = onBack) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "पीछे जाएं (Back)",
+                        contentDescription = tr("back_cd"),
                         tint = KiranaGreenPrimary,
                         modifier = Modifier.size(24.dp)
                     )
@@ -133,7 +135,7 @@ fun CustomerDetailView(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = if (hasOutstanding) "कुल बकाया राशि (You'll Receive)" else "हिसाब स्थिति (Account Status)",
+                            text = if (hasOutstanding) tr("you_receive") else tr("account_status"),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
                             color = if (hasOutstanding) KiranaBaakiRed else KiranaJamaGreen
@@ -147,7 +149,7 @@ fun CustomerDetailView(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = if (hasOutstanding) "ग्राहकों का यह उधार बाकी है" else "✓ पूरा हिसाब चुकता है",
+                            text = if (hasOutstanding) tr("credit_pending") else tr("all_settled"),
                             fontSize = 12.sp,
                             color = KiranaTextSecondary
                         )
@@ -165,7 +167,7 @@ fun CustomerDetailView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "लेन-देन का इतिहास (Transactions)",
+                        text = tr("txn_history"),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = KiranaTextPrimary
@@ -175,7 +177,7 @@ fun CustomerDetailView(
                         color = KiranaMintPill
                     ) {
                         Text(
-                            text = "${customer.transactions.size} एंट्रियां",
+                            text = tr("n_entries", customer.transactions.size),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = KiranaGreenDark,
@@ -246,7 +248,7 @@ private fun TransactionRowCard(transaction: LedgerTransaction) {
                     color = if (isCredit) KiranaBaakiRedLight else KiranaJamaGreenLight
                 ) {
                     Text(
-                        text = if (isCredit) "उधार (Gave)" else "जमा (Got)",
+                        text = if (isCredit) tr("gave") else tr("got"),
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         color = if (isCredit) KiranaBaakiRed else KiranaJamaGreen,

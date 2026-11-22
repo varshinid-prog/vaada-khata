@@ -46,7 +46,11 @@ fun VaadaBottomBar(
                 },
                 label = {
                     Text(
-                        text = destination.titleEn,
+                        text = when (destination) {
+                            com.vaada.ui.navigation.VaadaDestination.Assistant -> com.vaada.models.LocalUiStrings.current.navAssistant
+                            com.vaada.ui.navigation.VaadaDestination.Ledger -> com.vaada.models.LocalUiStrings.current.navKhata
+                            com.vaada.ui.navigation.VaadaDestination.Settings -> com.vaada.models.LocalUiStrings.current.navSettings
+                        },
                         fontSize = 12.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                     )

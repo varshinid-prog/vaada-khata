@@ -1,5 +1,7 @@
 package com.vaada.ui.auth
 
+import com.vaada.models.tr
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -71,7 +73,7 @@ fun WelcomeScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "बोलो। रिकॉर्ड करो। वादा निभाओ।",
+            text = tr("app_motto"),
             style = MaterialTheme.typography.bodyLarge,
             color = KiranaTextSecondary,
             textAlign = TextAlign.Center
@@ -97,7 +99,7 @@ fun WelcomeScreen(
             colors = ButtonDefaults.buttonColors(containerColor = KiranaGreenPrimary)
         ) {
             Text(
-                text = "लॉगिन करें (Login)",
+                text = tr("login"),
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
@@ -116,7 +118,7 @@ fun WelcomeScreen(
             colors = ButtonDefaults.outlinedButtonColors(contentColor = KiranaGreenPrimary)
         ) {
             Text(
-                text = "नया खाता बनाएं (Sign Up)",
+                text = tr("signup"),
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -150,19 +152,19 @@ fun LoginScreen(
         verticalArrangement = Arrangement.Center
     ) {
         TextButton(onClick = onBack, contentPadding = PaddingValues(0.dp)) {
-            Text("← वापस जाएं", color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
+            Text(tr("back_arrow"), color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
         }
         Spacer(Modifier.height(24.dp))
-        Text("लॉगिन करें", style = MaterialTheme.typography.headlineSmall,
+        Text(tr("login"), style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
         Spacer(Modifier.height(6.dp))
-        Text("अपने मोबाइल नंबर और 6-अंकीय PIN से लॉगिन करें।",
+        Text(tr("login_sub"),
             style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
         Spacer(Modifier.height(28.dp))
         OutlinedTextField(
             value = phone,
             onValueChange = { onPhoneChange(it.filter(Char::isDigit).take(10)) },
-            label = { Text("मोबाइल नंबर") }, prefix = { Text("+91  ", color = KiranaTextSecondary) },
+            label = { Text(tr("phone_label")) }, prefix = { Text("+91  ", color = KiranaTextSecondary) },
             singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Next),
             modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = KiranaGreenPrimary,
@@ -173,7 +175,7 @@ fun LoginScreen(
         OutlinedTextField(
             value = pin,
             onValueChange = { onPinChange(it.filter(Char::isDigit).take(6)) },
-            label = { Text("6-अंकीय PIN") }, singleLine = true,
+            label = { Text(tr("pin_label")) }, singleLine = true,
             visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus(); if (phone.length == 10 && pin.length == 6) onLogin() }),
@@ -192,7 +194,7 @@ fun LoginScreen(
             modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = KiranaGreenPrimary)) {
             if (loading) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-            else Text("लॉगिन करें (Login)", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            else Text(tr("login"), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
     }
 }
@@ -222,20 +224,20 @@ fun OtpScreen(
         verticalArrangement = Arrangement.Center
     ) {
         TextButton(onClick = onBack, contentPadding = PaddingValues(0.dp)) {
-            Text("← वापस जाएं", color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
+            Text(tr("back_arrow"), color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
         }
 
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "OTP दर्ज करें",
+            text = tr("otp_enter"),
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
             color = KiranaTextPrimary
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "+91 $phone पर OTP भेजा गया।",
+            text = tr("otp_sent", phone),
             style = MaterialTheme.typography.bodyMedium,
             color = KiranaTextSecondary
         )
@@ -245,7 +247,7 @@ fun OtpScreen(
         OutlinedTextField(
             value = otp,
             onValueChange = { if (it.length <= 6) onOtpChange(it.filter { c -> c.isDigit() }) },
-            label = { Text("6-अंकीय OTP") },
+            label = { Text(tr("otp_label")) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.NumberPassword,
@@ -283,14 +285,14 @@ fun OtpScreen(
             if (loading) {
                 CircularProgressIndicator(modifier = Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
             } else {
-                Text("सत्यापित करें (Verify)", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(tr("verify"), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
             }
         }
 
         Spacer(modifier = Modifier.height(14.dp))
 
         TextButton(onClick = onResend) {
-            Text("OTP फिर से भेजें (Resend OTP)", color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
+            Text(tr("otp_resend"), color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -321,13 +323,13 @@ fun SignupScreen(
         verticalArrangement = Arrangement.Center
     ) {
         TextButton(onClick = onBack, contentPadding = PaddingValues(0.dp)) {
-            Text("← वापस जाएं", color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
+            Text(tr("back_arrow"), color = KiranaGreenPrimary, fontWeight = FontWeight.Medium)
         }
         Spacer(Modifier.height(20.dp))
-        Text("खाता बनाएं", style = MaterialTheme.typography.headlineSmall,
+        Text(tr("create_title"), style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
         Spacer(Modifier.height(6.dp))
-        Text("अपनी और दुकान की जानकारी भरें।", style = MaterialTheme.typography.bodyMedium,
+        Text(tr("create_sub"), style = MaterialTheme.typography.bodyMedium,
             color = KiranaTextSecondary)
         Spacer(Modifier.height(22.dp))
         @Composable fun field(value: String, label: String, onChange: (String) -> Unit,
@@ -339,21 +341,21 @@ fun SignupScreen(
                     unfocusedBorderColor = KiranaBorder, focusedContainerColor = KiranaSurface,
                     unfocusedContainerColor = KiranaSurface))
         }
-        field(merchantName, "आपका नाम (Merchant Name)", onMerchantNameChange)
+        field(merchantName, tr("merchant_name"), onMerchantNameChange)
         Spacer(Modifier.height(10.dp))
-        field(shopName, "दुकान का नाम (Shop Name)", onShopNameChange)
+        field(shopName, tr("shop_name"), onShopNameChange)
         Spacer(Modifier.height(10.dp))
-        field(phone, "10-अंकीय मोबाइल नंबर", { onPhoneChange(it.filter(Char::isDigit).take(10)) }, KeyboardType.Phone)
+        field(phone, tr("phone10"), { onPhoneChange(it.filter(Char::isDigit).take(10)) }, KeyboardType.Phone)
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(value = pin, onValueChange = { onPinChange(it.filter(Char::isDigit).take(6)) },
-            label = { Text("6-अंकीय PIN बनाएं") }, singleLine = true,
+            label = { Text(tr("pin_create")) }, singleLine = true,
             visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
             modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = KiranaGreenPrimary,
                 unfocusedBorderColor = KiranaBorder, focusedContainerColor = KiranaSurface,
                 unfocusedContainerColor = KiranaSurface))
-        Text("PIN में 6 अंक होने चाहिए। आसान PIN जैसे 123456 स्वीकार नहीं होंगे।",
+        Text(tr("pin_rule"),
             color = KiranaTextMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         AnimatedVisibility(visible = error != null, enter = fadeIn(), exit = fadeOut()) {
             Text(error ?: "", color = KiranaBaakiRed, fontSize = 12.sp,
@@ -365,7 +367,7 @@ fun SignupScreen(
             modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = KiranaGreenPrimary)) {
             if (loading) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-            else Text("खाता बनाएं (Create Account)", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            else Text(tr("create_title"), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
     }
 }

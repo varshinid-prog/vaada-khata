@@ -18,7 +18,7 @@ class KhataApiException(
 
 class KhataApiClient(
     private val sessionToken: String,
-    private val baseUrl: String = "http://10.115.28.169:8000"
+    private val baseUrl: String = com.vaada.config.ServerConfig.ledgerUrl
 ) {
     private fun get(path: String): String {
         val connection = URL(baseUrl.trimEnd('/') + path)

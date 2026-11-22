@@ -47,6 +47,8 @@ class VaadaAudioService : Service() {
         const val ACTION_STOP_SERVICE = "com.vaada.action.STOP_SERVICE"
         const val ACTION_START_RECORDING = "com.vaada.action.START_RECORDING"
         const val ACTION_STOP_RECORDING = "com.vaada.action.STOP_RECORDING"
+        const val ACTION_REPLAY = "com.vaada.action.REPLAY"
+        const val ACTION_RETRY = "com.vaada.action.RETRY"
 
         private val _assistantState = MutableStateFlow<AssistantState>(AssistantState.Stopped)
         val assistantState: StateFlow<AssistantState> = _assistantState.asStateFlow()
@@ -77,6 +79,18 @@ class VaadaAudioService : Service() {
 
         // Merchant login token is held in memory only and supplied by MainActivity.
         @Volatile private var merchantBearerToken: String? = null
+
+        // The turn the merchant is looking at (processing / transcript + reply / error). Separate from the microphone lifecycle state:
+        // resuming wake-word standby sets assistantState back to Standby, which used to wipe the reply and error from the screen.
+        private val _turnView = MutableStateFlow<AssistantState?>(null)
+        val turnView: StateFlow<AssistantState?> = _turnView.asStateFlow()
+
+        private val _lastGatewayLatencyMs = MutableStateFlow(0L)
+        /** Upload + gateway time of the last turn (STT, dialogue, ledger, TTS), for diagnostics. */
+        val lastGatewayLatencyMs: StateFlow<Long> = _lastGatewayLatencyMs.asStateFlow()
+
+        @Volatile private var languageLocale: String = "en-IN"
+        fun setLanguage(locale: String) { languageLocale = locale }
 
         fun setMerchantToken(token: String?) {
             merchantBearerToken = token?.takeIf { it.isNotBlank() }
@@ -120,6 +134,15 @@ class VaadaAudioService : Service() {
             context.startService(intent)
         }
 
+        /** Say the last reply again. Re-synthesises the same sentences on the gateway; never re-sends a ledger entry. */
+        fun replayLast(context: Context) {
+            context.startService(Intent(context, VaadaAudioService::class.java).apply { action = ACTION_REPLAY })
+        }
+
+        fun retryLast(context: Context) {
+            context.startService(Intent(context, VaadaAudioService::class.java).apply { action = ACTION_RETRY })
+        }
+
         fun stopRecording(context: Context) {
             val intent = Intent(context, VaadaAudioService::class.java).apply {
                 action = ACTION_STOP_RECORDING
@@ -161,121 +184,33 @@ class VaadaAudioService : Service() {
             onAmplitudeUpdate = { normalizedRms ->
                 _assistantState.value = AssistantState.Listening(normalizedRms)
             }
-            onCaptureCompleted = { metadata, pcmFile ->
-                Log.i(TAG, "Audio capture finished. Bytes: ${metadata.totalBytes}, Duration: ${metadata.durationMs} ms")
+            onCaptureCompleted = lambda@{ metadata, pcmFile ->
+                Log.i(TAG, "Audio capture finished. Bytes: ${metadata.totalBytes}, Duration: ${metadata.durationMs} ms, end=${metadata.endReason}")
+                // A push-to-talk capture that ended by itself (silence / max length) must release the PTT flag, otherwise
+                // resumeWakeWordStandbyAfterCapture() returns early and wake-word detection never comes back.
+                isManualRecordingActive.set(false)
+                if (!metadata.speechDetected || pcmFileMissingFor(metadata)) {
+                    Log.i(TAG, "No speech in capture (end=${metadata.endReason}); nothing uploaded")
+                    _lastCapturedMetadata.value = metadata
+                    val ui = com.vaada.models.UiStrings.of(com.vaada.models.AppLanguage.fromLocale(languageLocale) ?: com.vaada.models.AppLanguage.ENGLISH)
+                    setTurn(if (metadata.endReason == "ERROR") AssistantState.Error(ui.micProblem) else AssistantState.Error(ui.noSpeech))
+                    updateNotification(isRecording = false)
+                    isConversationActive.set(false)
+                    resumeWakeWordStandbyAfterCapture()
+                    return@lambda
+                }
                 _lastCapturedMetadata.value = metadata
                 _assistantState.value = AssistantState.Captured(metadata)
                 updateNotification(isRecording = false)
 
-                // ── Gateway upload ──────────────────────────────────────────
-                val clientMsgId = UUID.randomUUID().toString()
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        if (pcmFile == null || !pcmFile.exists()) {
-                            Log.e(TAG, "PCM file missing – skipping gateway upload")
-                            resumeWakeWordStandbyAfterCapture()
-                            return@launch
-                        }
-                        // Show processing state while network call is in flight
-                        _assistantState.value = AssistantState.Processing
-
-                        val wavFile = File(cacheDir, "last_utterance.wav")
-                        pcmToWav(pcmFile, wavFile)
-
-                        Log.i(TAG, "Sending to gateway [session=$sessionId, clientMsgId=$clientMsgId, wavBytes=${wavFile.length()}]")
-                        val currentMerchantToken = merchantBearerToken
-                            ?: throw java.io.IOException("Merchant session missing. Please log in again.")
-                        val result = voiceGatewayClient.sendTurn(
-                            audioFile    = wavFile,
-                            sessionId    = sessionId,
-                            merchantToken = currentMerchantToken,
-                            clientMsgId  = clientMsgId,
-                            language     = "hi-IN,en-IN"
-                        )
-                        Log.i(TAG,
-                            "Gateway OK | status=${result.status} | transcript=\"${result.transcript}\" " +
-                            "| replyText=\"${result.replyText}\" | kind=${result.replyKind} " +
-                            "| dialogueState=${result.dialogueState} | ledgerCommitted=${result.ledgerCommitted} " +
-                            "| duplicate=${result.duplicate}"
-                        )
-                        if (result.ledgerCommitted) {
-                            Log.i(TAG, "LEDGER COMMITTED – transaction saved (txId=${result.ledgerTransactionId})")
-                        }
-                        val awaitingValue = result.awaiting?.trim()?.lowercase().orEmpty()
-                        val stateValue = result.dialogueState?.trim()?.lowercase().orEmpty()
-
-                        val confirmationPending =
-                            awaitingValue.contains("confirm") ||
-                                    awaitingValue == "yes_no" ||
-                                    stateValue.contains("awaiting_confirmation") ||
-                                    stateValue.contains("awaiting confirmation")
-
-                        isConversationActive.set(confirmationPending)
-
-                        Log.i(
-                            TAG,
-                            "Conversation status: pending=$confirmationPending, " +
-                                    "awaiting=${result.awaiting}, state=${result.dialogueState}"
-                        )
-                        // Transition to Responding state so the UI can display reply
-                        _assistantState.value = AssistantState.Responding(
-                            transcript      = result.transcript,
-                            replyText       = result.replyText,
-                            replyKind       = result.replyKind,
-                            dialogueState   = result.dialogueState,
-                            ledgerCommitted = result.ledgerCommitted,
-                            duplicate       = result.duplicate
-                        )
-                        // Do not replay duplicate replies. Keep wake-word paused while audio plays.
-                        if (!result.duplicate && !result.audioBase64.isNullOrBlank()) {
-                            try {
-                                playGatewayAudio(result.audioBase64)
-                            } catch (playbackError: Exception) {
-                                Log.e(TAG, "Could not play gateway audio", playbackError)
-                            }
-                        } else {
-                            Log.i(TAG, "No playable gateway audio; status=${result.audioStatus}, duplicate=${result.duplicate}")
-                        }
-                    } catch (e: com.vaada.network.VoiceGatewayException) {
-                        Log.e(TAG, "Gateway error [${e.errorCode}]: ${e.message}")
-                        _assistantState.value = AssistantState.Error("Gateway: ${e.message}")
-                    } catch (e: java.io.IOException) {
-                        Log.e(TAG, "Network IO error contacting gateway", e)
-                        _assistantState.value = AssistantState.Error("Network error – check connection")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Unexpected error during gateway upload", e)
-                        _assistantState.value = AssistantState.Error("Unexpected error: ${e.message}")
-                    } finally {
-                        if (isConversationActive.get() && isServiceRunning.get()) {
-                            Log.i(TAG, "Confirmation pending. Listening again without wake word...")
-
-                            serviceScope.launch(Dispatchers.Main) {
-                                delay(400)
-
-                                if (isConversationActive.get() && isServiceRunning.get()) {
-                                    _assistantState.value = AssistantState.Listening(0f)
-                                    updateNotification(isRecording = true)
-
-                                    try {
-                                        audioCaptureManager.startCapture(serviceScope)
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Failed to continue confirmation listening", e)
-                                        isConversationActive.set(false)
-                                        resumeWakeWordStandbyAfterCapture()
-                                    }
-                                } else {
-                                    resumeWakeWordStandbyAfterCapture()
-                                }
-                            }
-                        } else {
-                            resumeWakeWordStandbyAfterCapture()
-                        }
-                    }
-                }
+                // ── Gateway upload ── (everything after this point lives in launchTurn / sendAndRespond / afterTurn)
+                launchTurn(pcmFile, retry = false)
             }
             onError = { errorMessage ->
                 Log.e(TAG, "AudioCaptureManager error: $errorMessage")
-                _assistantState.value = AssistantState.Error(errorMessage)
+                isManualRecordingActive.set(false)
+                isConversationActive.set(false)
+                setTurn(AssistantState.Error(errorMessage))
                 updateNotification(isRecording = false)
                 resumeWakeWordStandbyAfterCapture()
             }
@@ -303,9 +238,226 @@ class VaadaAudioService : Service() {
             ACTION_STOP_RECORDING -> {
                 handleManualStopRecording()
             }
+
+            ACTION_REPLAY -> {
+                handleReplay()
+            }
+
+            ACTION_RETRY -> {
+                handleRetry()
+            }
         }
 
         return START_STICKY
+    }
+
+
+    // ======================================================================== one voice turn
+    // capture -> upload -> transcript + reply shown -> reply spoken -> (listen for the answer | wake-word standby)
+    // Every failure ends in a visible, localized Error state; the text of a reply is shown BEFORE any attempt to speak it.
+    @Volatile private var lastWav: File? = null
+    @Volatile private var lastMsgId: String? = null
+    @Volatile private var retryable: Boolean = false
+
+    private fun lang(): com.vaada.models.AppLanguage =
+        com.vaada.models.AppLanguage.fromLocale(languageLocale) ?: com.vaada.models.AppLanguage.ENGLISH
+
+    private fun setTurn(state: AssistantState) {
+        _turnView.value = state
+        _assistantState.value = state
+    }
+
+    private fun launchTurn(pcmFile: File?, retry: Boolean) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val wav: File
+                val msgId: String
+                if (retry) {
+                    wav = lastWav ?: throw java.io.IOException("nothing to retry")
+                    msgId = lastMsgId ?: throw java.io.IOException("nothing to retry")   // SAME id: the gateway replays instead of repeating
+                } else {
+                    if (pcmFile == null || !pcmFile.exists()) throw java.io.IOException("recording could not be read")
+                    wav = File(cacheDir, "last_utterance.wav")
+                    pcmToWav(pcmFile, wav)
+                    msgId = UUID.randomUUID().toString()
+                    lastWav = wav
+                    lastMsgId = msgId
+                }
+                setTurn(AssistantState.Processing)
+                sendAndRespond(wav, msgId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                reportFailure(e)
+            } finally {
+                afterTurn()
+            }
+        }
+    }
+
+    private suspend fun sendAndRespond(wavFile: File, msgId: String) {
+        val token = merchantBearerToken ?: throw IllegalStateException("no-session")
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val result = voiceGatewayClient.sendTurn(
+            audioFile = wavFile, sessionId = sessionId, merchantToken = token, clientMsgId = msgId, language = languageLocale
+        )
+        val ms = android.os.SystemClock.elapsedRealtime() - t0
+        _lastGatewayLatencyMs.value = ms
+        retryable = false
+        // diagnostics: sizes, categories and timings only. Never transcript or reply text, names, amounts, tokens or audio.
+        Log.i(TAG, "turn ok | http=200 | ${ms} ms | status=${result.status} | kind=${result.replyKind} | state=${result.dialogueState} " +
+            "| awaiting=${result.awaiting} | transcriptChars=${result.transcript.length} | replyChars=${result.replyText.length} " +
+            "| committed=${result.ledgerCommitted} | duplicate=${result.duplicate} | audio=${result.audioStatus}:${result.audioBase64?.length ?: 0}b64 " +
+            "| uploadBytes=${wavFile.length()}")
+        if (result.ledgerCommitted) Log.i(TAG, "ledger commit confirmed by backend")
+
+        // Keep listening for the merchant's answer to a confirmation OR a clarification question (no wake word needed).
+        isConversationActive.set(result.awaiting != null && !result.duplicate)
+
+        // 1) show the words and the reply immediately (independent of audio)
+        val shown = AssistantState.Responding(
+            transcript = result.transcript, replyText = result.replyText, replyKind = result.replyKind,
+            dialogueState = result.dialogueState, ledgerCommitted = result.ledgerCommitted, duplicate = result.duplicate,
+            awaiting = result.awaiting, pendingCustomer = result.pendingCustomer, pendingAmountPaise = result.pendingAmountPaise,
+            pendingType = result.pendingType
+        )
+        setTurn(shown)
+        if (result.duplicate) return                                  // a replayed answer is never spoken twice
+
+        // 2) speak it: provider audio first, Android TextToSpeech as the fallback, and say so if neither works
+        var spoken = false
+        val audio = result.audioBase64
+        if (!audio.isNullOrBlank()) {
+            setTurn(shown.copy(speaking = true))
+            try {
+                playGatewayAudio(audio)
+                spoken = true
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "provider audio playback failed (${e.javaClass.simpleName})")
+            }
+        }
+        if (!spoken && result.replySpeak.isNotEmpty()) {
+            setTurn(shown.copy(speaking = true))
+            spoken = speakWithAndroidTts(result.replySpeak.joinToString(" "), languageLocale)
+            Log.i(TAG, "android TextToSpeech fallback: ${if (spoken) "played" else "unavailable for $languageLocale"}")
+        }
+        setTurn(shown.copy(speaking = false, audioNote = if (spoken) null else "voice_unavailable"))
+    }
+
+    private fun reportFailure(e: Exception) {
+        isConversationActive.set(false)
+        val l = lang()
+        val (message, canRetry) = when {
+            e is com.vaada.network.VoiceGatewayException ->
+                (e.userMessage ?: com.vaada.models.UiCatalog.get("err_server", l)) to (e.recoverable && e.httpStatus != 401)
+            e is IllegalStateException && e.message == "no-session" -> com.vaada.models.UiCatalog.get("err_login", l) to false
+            e is java.net.SocketTimeoutException -> com.vaada.models.UiCatalog.get("err_timeout", l) to true
+            e is java.io.IOException -> com.vaada.models.UiCatalog.get("err_network", l) to true
+            else -> com.vaada.models.UiCatalog.get("err_server", l) to true
+        }
+        val category = when (e) {
+            is com.vaada.network.VoiceGatewayException -> "gateway:${e.errorCode}:http${e.httpStatus}"
+            else -> e.javaClass.simpleName
+        }
+        Log.e(TAG, "turn failed | category=$category | retryable=$canRetry")      // never e.message: it may carry customer text
+        retryable = canRetry && lastWav?.exists() == true
+        setTurn(AssistantState.Error(message, canRetry = canRetry))
+    }
+
+    /** Runs after every turn, success or failure: re-open the microphone for an expected answer, otherwise hand it back to wake-word. */
+    private fun afterTurn() {
+        if (isConversationActive.get() && isServiceRunning.get()) {
+            serviceScope.launch(Dispatchers.Main) {
+                delay(250)      // short guard so the end of the spoken reply is not recorded as the answer
+                if (isConversationActive.get() && isServiceRunning.get()) {
+                    _assistantState.value = AssistantState.Listening(0f)
+                    updateNotification(isRecording = true)
+                    try {
+                        audioCaptureManager.startCapture(serviceScope)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "could not reopen the microphone (${e.javaClass.simpleName})")
+                        isConversationActive.set(false)
+                        resumeWakeWordStandbyAfterCapture()
+                    }
+                } else {
+                    resumeWakeWordStandbyAfterCapture()
+                }
+            }
+        } else {
+            resumeWakeWordStandbyAfterCapture()
+        }
+    }
+
+    /** Retry button: re-send the SAME recording with the SAME message id (never a second entry), or record again when there is none. */
+    private fun handleRetry() {
+        val wav = lastWav
+        if (retryable && wav != null && wav.exists()) {
+            if (!isServiceRunning.get() || audioCaptureManager.isCapturing || !isHandoffInProgress.compareAndSet(false, true)) return
+            wakeWordDetector?.pauseDetection()
+            launchTurn(null, retry = true)
+        } else {
+            handleManualStartRecording()
+        }
+    }
+
+    /** Android's own speech engine, only when the provider audio is missing or failed, and only if it has the merchant's language. */
+    private suspend fun speakWithAndroidTts(text: String, locale: String): Boolean = withContext(Dispatchers.Main) {
+        suspendCancellableCoroutine { cont ->
+            var engine: android.speech.tts.TextToSpeech? = null
+            fun finish(ok: Boolean) {
+                try { engine?.shutdown() } catch (_: Exception) { }
+                if (cont.isActive) cont.resume(ok)
+            }
+            engine = android.speech.tts.TextToSpeech(applicationContext) { status ->
+                val e = engine
+                if (status != android.speech.tts.TextToSpeech.SUCCESS || e == null) { finish(false); return@TextToSpeech }
+                val loc = java.util.Locale.forLanguageTag(locale)
+                if (e.isLanguageAvailable(loc) < android.speech.tts.TextToSpeech.LANG_AVAILABLE) { finish(false); return@TextToSpeech }
+                e.language = loc
+                e.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) { finish(true) }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) { finish(false) }
+                })
+                if (e.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "vaada_fallback") != android.speech.tts.TextToSpeech.SUCCESS) finish(false)
+            }
+            cont.invokeOnCancellation { try { engine?.shutdown() } catch (_: Exception) { } }
+        }
+    }
+
+    /**
+     * Replay the last spoken reply. Only while nothing else owns the microphone: the wake-word detector is paused during playback
+     * (so it cannot hear the assistant's own voice) and resumed afterwards, exactly like a normal reply.
+     */
+    private fun handleReplay() {
+        if (!isServiceRunning.get() || audioCaptureManager.isCapturing || !isHandoffInProgress.compareAndSet(false, true)) {
+            Log.w(TAG, "Replay ignored: the microphone or a reply is busy")
+            return
+        }
+        val token = merchantBearerToken
+        if (token.isNullOrBlank()) { isHandoffInProgress.set(false); return }
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                wakeWordDetector?.pauseDetection()
+                val audio = voiceGatewayClient.replay(sessionId, token)
+                if (audio.isNullOrBlank()) throw java.io.IOException("nothing to replay")
+                val before = _turnView.value as? AssistantState.Responding
+                if (before != null) setTurn(before.copy(speaking = true))
+                playGatewayAudio(audio)
+                if (before != null) setTurn(before.copy(speaking = false, audioNote = null))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "replay failed (${e.javaClass.simpleName})")   // never the message: it may carry reply text
+                val cur = _turnView.value as? AssistantState.Responding
+                if (cur != null) setTurn(cur.copy(speaking = false, audioNote = "voice_unavailable"))
+            } finally {
+                resumeWakeWordStandbyAfterCapture()
+            }
+        }
     }
 
     /** Decode and play the WAV returned by the voice gateway. This suspends until playback ends. */
@@ -546,6 +698,7 @@ class VaadaAudioService : Service() {
             try {
                 // Step 1: Pause detector and stop its AudioRecord (T0 -> T1)
                 val pauseDurationMs = wakeWordDetector?.pauseDetection() ?: 0L
+                val preRoll = wakeWordDetector?.audioSinceTrigger(audioCaptureManager.endpointConfig.preRollMs.toInt())
                 val t1DetectorPaused = System.currentTimeMillis()
                 Log.d("HandoffProfiler", "T0->T1: Detector paused in ${t1DetectorPaused - t0WakeDetected}ms (audioRecord.stop() = ${pauseDurationMs}ms)")
 
@@ -562,10 +715,10 @@ class VaadaAudioService : Service() {
 
                 // Step 4: Start recording the merchant command (T2 -> T3 -> T4)
                 Log.i(TAG, "Starting AudioCaptureManager for merchant command at T2=$t2CaptureStart...")
-                audioCaptureManager.startCapture(serviceScope, handoffStartTimeMs = t0WakeDetected)
+                audioCaptureManager.startCapture(serviceScope, handoffStartTimeMs = t0WakeDetected, preRoll = preRoll)
             } catch (e: Exception) {
                 Log.e(TAG, "Exception during mic handoff to AudioCaptureManager", e)
-                _assistantState.value = AssistantState.Error("Handoff Failed: ${e.message}")
+                setTurn(AssistantState.Error(com.vaada.models.UiStrings.of(lang()).micProblem))
                 isHandoffInProgress.set(false)
                 resumeWakeWordStandbyAfterCapture()
             }
@@ -575,6 +728,8 @@ class VaadaAudioService : Service() {
     /**
      * Resumes wake-word standby detection after utterance capture finishes.
      */
+    private fun pcmFileMissingFor(m: com.vaada.models.AudioCaptureMetadata): Boolean = m.totalBytes <= 0
+
     private fun resumeWakeWordStandbyAfterCapture() {
         if (!isServiceRunning.get() || isManualRecordingActive.get()) return
 
@@ -621,7 +776,7 @@ class VaadaAudioService : Service() {
                 audioCaptureManager.startCapture(serviceScope)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed manual start recording", e)
-                _assistantState.value = AssistantState.Error(e.message ?: "Manual record error")
+                setTurn(AssistantState.Error(com.vaada.models.UiStrings.of(lang()).micProblem))
             }
         }
     }

@@ -17,6 +17,11 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // Mac LAN IP for dev builds; override with -PvaadaHost=<ip>. Also changeable at runtime in Settings.
+        buildConfigField("String", "DEFAULT_HOST", "\"${(project.findProperty("vaadaHost") as String?) ?: "10.115.28.169"}\"")
+        buildConfigField("int", "LEDGER_PORT", "8000")
+        buildConfigField("int", "GATEWAY_PORT", "8100")
+
         ndk {
             abiFilters.add("arm64-v8a")
         }
@@ -46,6 +51,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -61,6 +67,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
 
+    testImplementation("junit:junit:4.13.2")
     debugImplementation(libs.androidx.ui.tooling)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

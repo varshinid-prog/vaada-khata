@@ -203,6 +203,23 @@ class WakeWordDetector(
         }
     }
 
+    @Volatile private var triggerMark = -1L
+
+    /**
+     * Audio the detector already heard AFTER the wake word fired (up to [maxMs]), for the recorder to prepend so the first
+     * syllables spoken during the microphone handoff are not lost. It never includes the wake phrase itself. Empty when there
+     * was no trigger (push-to-talk) or nothing new arrived. Call after [pauseDetection].
+     */
+    fun audioSinceTrigger(maxMs: Int = 400): ShortArray {
+        val mark = triggerMark
+        triggerMark = -1L
+        if (mark < 0) return ShortArray(0)
+        val available = (audioRing.totalWritten - mark).coerceAtLeast(0)
+        val n = minOf(available, maxMs * 16L, 16000L).toInt()      // 16 kHz
+        if (n <= 0) return ShortArray(0)
+        return ShortArray(n).also { audioRing.getLastSamplesInto(it, n) }
+    }
+
     fun pauseDetection(): Long {
         val tStart = System.currentTimeMillis()
         isPaused = true
@@ -560,6 +577,7 @@ class WakeWordDetector(
     }
 
     private fun onWakeWordDetected(score: Float) {
+        triggerMark = audioRing.totalWritten
         cooldownRemaining = cooldownTotalCycles
         onDetected(score)
     }
@@ -597,6 +615,9 @@ class WakeWordDetector(
     class AudioRingBuffer(private val capacity: Int) {
         private val buffer = ShortArray(capacity)
         private var writeIndex = 0
+        /** Total samples ever written (monotonic until clear()); lets a caller ask for "audio since mark". */
+        @Volatile var totalWritten = 0L
+            private set
 
         fun addBlock(samples: ShortArray, size: Int) {
             val limit = size.coerceAtMost(capacity)
@@ -608,6 +629,7 @@ class WakeWordDetector(
                 System.arraycopy(samples, spaceToEnd, buffer, 0, limit - spaceToEnd)
             }
             writeIndex = (writeIndex + limit) % capacity
+            totalWritten += limit
         }
 
         fun getLastSamplesInto(dest: ShortArray, n: Int) {
@@ -623,6 +645,7 @@ class WakeWordDetector(
 
         fun clear() {
             writeIndex = 0
+            totalWritten = 0
             buffer.fill(0)
         }
     }

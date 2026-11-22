@@ -1,5 +1,7 @@
 package com.vaada.ui.assistant
 
+import com.vaada.models.tr
+
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -28,9 +30,14 @@ import com.vaada.ui.theme.*
 @Composable
 fun HomeScreen(
     state: AssistantState,
+    turn: AssistantState?,
     hasPermissions: Boolean,
     lastMetadata: AudioCaptureMetadata?,
     shopName: String,
+    language: com.vaada.models.AppLanguage,
+    onLanguageChange: (com.vaada.models.AppLanguage) -> Unit,
+    onReplay: () -> Unit,
+    onRetry: () -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
     onStartRecording: () -> Unit,
@@ -38,6 +45,7 @@ fun HomeScreen(
     onRequestPermissions: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val ui = com.vaada.models.LocalUiStrings.current
     val scrollState = rememberScrollState()
     val isListening = state is AssistantState.Listening
     val isStopped = state is AssistantState.Stopped
@@ -59,6 +67,8 @@ fun HomeScreen(
         ) {
             // ── Top bar ───────────────────────────────────────────────────────
             MerchantTopBar(state = state, shopName = shopName)
+            Spacer(modifier = Modifier.height(8.dp))
+            LanguageSwitcher(current = language, onChange = onLanguageChange)
 
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -70,9 +80,9 @@ fun HomeScreen(
             // ── Headline / status text ────────────────────────────────────────
             Text(
                 text = when (state) {
-                    is AssistantState.Processing -> "समझ रहा हूँ..."
-                    is AssistantState.Responding -> "जवाब तैयार है"
-                    else -> "नमस्ते! मैं क्या लिखूँ?"
+                    is AssistantState.Processing -> ui.processing
+                    is AssistantState.Responding -> ui.replyReady
+                    else -> ui.idleHeadline
                 },
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
@@ -82,13 +92,13 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(6.dp))
 
             val statusSubtitle = when (state) {
-                is AssistantState.Stopped   -> "सहायक बंद है • नीचे दिए बटन से शुरू करें"
-                is AssistantState.Standby   -> "\"Hey Jarvis\" बोलें या बटन दबाकर कहें"
-                is AssistantState.Listening -> "सुन रहा हूँ... अपनी बात बोलें"
-                is AssistantState.Captured  -> "रिकॉर्ड हो गया • gateway पर भेज रहा है..."
-                is AssistantState.Processing -> "Gateway से जवाब मिल रहा है..."
-                is AssistantState.Responding -> state.replyText.ifBlank { "जवाब तैयार है" }
-                is AssistantState.Error     -> "त्रुटि: ${state.message}"
+                is AssistantState.Stopped   -> ui.stopped
+                is AssistantState.Standby   -> ui.standby
+                is AssistantState.Listening -> ui.listening
+                is AssistantState.Captured  -> ui.sending
+                is AssistantState.Processing -> ui.waitingReply
+                is AssistantState.Responding -> state.replyText.ifBlank { ui.replyReady }
+                is AssistantState.Error     -> tr("err_prefix", state.message)
             }
 
             Text(
@@ -121,7 +131,10 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(28.dp))
 
             // ── Gateway reply card ────────────────────────────────────────────
-            GatewayReplyCard(state = state, metadata = lastMetadata)
+            GatewayReplyCard(state = turn ?: state, metadata = lastMetadata, onRetry = onRetry)
+            if (turn is AssistantState.Responding) {
+                OutlinedButton(onClick = onReplay, modifier = Modifier.padding(top = 8.dp)) { Text("🔁  " + tr("replay")) }
+            }
         }
 
         // ── Push-to-talk button ───────────────────────────────────────────────
@@ -159,7 +172,7 @@ fun HomeScreen(
                 if (isProcessing) {
                     CircularProgressIndicator(modifier = Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(10.dp))
-                    Text("प्रोसेसिंग...", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(tr("processing_btn"), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 } else {
                     Icon(
                         imageVector = when {
@@ -174,9 +187,9 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
                         text = when {
-                            isListening -> "⏹  बोलना समाप्त करें (Done)"
-                            isStopped   -> "सहायक चालू करें (Start)"
-                            else        -> "🎙  दबाकर बोलें (Push to Talk)"
+                            isListening -> tr("btn_done")
+                            isStopped   -> tr("btn_start")
+                            else        -> tr("btn_ptt")
                         },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
@@ -187,7 +200,7 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = if (isStandby) "हाथ खाली नहीं हैं? बस \"Hey Jarvis\" बोलें" else "किराना वॉइस खाता",
+                text = if (isStandby) tr("handsfree") else tr("app_tagline"),
                 fontSize = 12.sp,
                 color = KiranaTextMuted
             )
@@ -196,6 +209,32 @@ fun HomeScreen(
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
+
+/** Always-visible language switcher on the dashboard: changes UI, STT/TTS and reply language immediately; the session stays signed in. */
+/** Integer paise -> "₹340" or "₹340.50" (no floating point anywhere near money). */
+private fun rupees(paise: Long): String {
+    val r = paise / 100
+    val p = (paise % 100).toInt()
+    return if (p == 0) "₹$r" else "₹$r.${p.toString().padStart(2, '0')}"
+}
+
+@Composable
+private fun LanguageSwitcher(current: com.vaada.models.AppLanguage, onChange: (com.vaada.models.AppLanguage) -> Unit) {
+    var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+        OutlinedButton(onClick = { open = true }) {
+            Text("🌐  ${current.nativeName}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            com.vaada.models.AppLanguage.entries.forEach { lang ->
+                DropdownMenuItem(
+                    text = { Text("${lang.nativeName}  (${lang.englishName})", fontWeight = if (lang == current) FontWeight.Bold else FontWeight.Normal) },
+                    onClick = { open = false; if (lang != current) onChange(lang) }
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun MerchantTopBar(state: AssistantState, shopName: String) {
@@ -213,7 +252,7 @@ private fun MerchantTopBar(state: AssistantState, shopName: String) {
                 Text("VAADA KHATA", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp, color = KiranaGreenPrimary)
             }
             Text(
-                text = shopName.ifBlank { "आपकी दुकान" },
+                text = shopName.ifBlank { com.vaada.models.LocalUiStrings.current.yourShop },
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = KiranaTextPrimary
@@ -230,13 +269,13 @@ private fun MerchantTopBar(state: AssistantState, shopName: String) {
             else                          -> KiranaTextMuted
         }
         val statusLabel = when (state) {
-            is AssistantState.Listening   -> "सुन रहा है"
-            is AssistantState.Processing  -> "प्रोसेसिंग"
-            is AssistantState.Responding  -> "जवाब"
+            is AssistantState.Listening   -> tr("st_listening")
+            is AssistantState.Processing  -> tr("st_processing")
+            is AssistantState.Responding  -> tr("st_reply")
             is AssistantState.Standby     -> "Active"
-            is AssistantState.Captured    -> "भेज रहा है"
-            is AssistantState.Error       -> "त्रुटि"
-            else                          -> "बंद"
+            is AssistantState.Captured    -> tr("st_sending")
+            is AssistantState.Error       -> tr("st_error")
+            else                          -> tr("st_off")
         }
         val isActive = state !is AssistantState.Stopped
 
@@ -265,7 +304,8 @@ private fun MerchantTopBar(state: AssistantState, shopName: String) {
 // ── Gateway reply card ────────────────────────────────────────────────────────
 
 @Composable
-private fun GatewayReplyCard(state: AssistantState, metadata: AudioCaptureMetadata?) {
+private fun GatewayReplyCard(state: AssistantState, metadata: AudioCaptureMetadata?, onRetry: () -> Unit) {
+    val ui = com.vaada.models.LocalUiStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -275,7 +315,7 @@ private fun GatewayReplyCard(state: AssistantState, metadata: AudioCaptureMetada
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Text(
-                text = "नवीनतम जवाब (LATEST REPLY)",
+                text = tr("latest_reply"),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.8.sp,
@@ -288,14 +328,14 @@ private fun GatewayReplyCard(state: AssistantState, metadata: AudioCaptureMetada
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), color = KiranaGreenPrimary, strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(10.dp))
-                        Text("Gateway से जवाब मिल रहा है...", style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
+                        Text(ui.waitingReply, style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
                     }
                 }
 
                 is AssistantState.Responding -> {
                     // Transcript
                     if (state.transcript.isNotBlank()) {
-                        Text("आपने कहा:", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = KiranaTextSecondary)
+                        Text(ui.youSaid, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = KiranaTextSecondary)
                         Spacer(modifier = Modifier.height(2.dp))
                         Text("\"${state.transcript}\"", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = KiranaTextPrimary)
                         Spacer(modifier = Modifier.height(12.dp))
@@ -316,32 +356,61 @@ private fun GatewayReplyCard(state: AssistantState, metadata: AudioCaptureMetada
                         }
                         Surface(shape = RoundedCornerShape(12.dp), color = replyBg, border = androidx.compose.foundation.BorderStroke(1.dp, replyBg)) {
                             Column(modifier = Modifier.padding(12.dp)) {
+                                // shown ONLY when the backend confirmed the commit (state.ledgerCommitted comes from ledger.committed)
                                 if (state.ledgerCommitted) {
-                                    Text("✓ Transaction committed", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = KiranaJamaGreen)
+                                    Text(tr("saved_ok"), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = KiranaJamaGreen)
                                     Spacer(modifier = Modifier.height(4.dp))
                                 }
-                                Text(state.replyText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = replyColor)
-                                if (!state.dialogueState.isNullOrBlank()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text("State: ${state.dialogueState}", fontSize = 11.sp, color = KiranaTextMuted)
+                                Text(state.replyText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = replyColor)
+                            }
+                        }
+                    }
+
+                    // What the assistant understood, to verify before saying yes: customer, amount, credit or payment
+                    if (state.pendingCustomer != null || state.pendingAmountPaise != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(shape = RoundedCornerShape(12.dp), color = KiranaCreamBg, border = androidx.compose.foundation.BorderStroke(1.dp, KiranaBorder)) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text("${tr("lbl_customer")}: ${state.pendingCustomer ?: "?"}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
+                                // amount/type rows only when they exist (adding a customer has neither)
+                                if (state.pendingAmountPaise != null || state.pendingType != null) {
+                                    Text("${tr("lbl_amount")}: ${state.pendingAmountPaise?.let { rupees(it) } ?: "?"}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
+                                    Text("${tr("lbl_type")}: ${when (state.pendingType) { "CREDIT" -> tr("gave"); "PAYMENT" -> tr("got"); else -> tr("lbl_not_decided") }}",
+                                        fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
+                                }
+                                if (state.awaiting == "confirmation") {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(tr("lbl_confirm_q"), fontSize = 12.sp, color = KiranaTextSecondary)
                                 }
                             }
                         }
                     }
 
-                    if (state.duplicate) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text("(duplicate response — not spoken again)", fontSize = 11.sp, color = KiranaTextMuted)
+                    if (state.speaking) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("🔊  " + tr("speaking"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = KiranaGreenPrimary)
+                    }
+                    if (state.audioNote != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(tr(state.audioNote), fontSize = 12.sp, color = KiranaBaakiRed)
+                    }
+                }
+
+                is AssistantState.Error -> {
+                    Text("⚠  " + state.message, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = KiranaBaakiRed)
+                    if (state.canRetry) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Button(onClick = onRetry) { Text(tr("retry")) }
                     }
                 }
 
                 else -> {
                     // Idle suggestion chips — generic voice command examples (no real names)
-                    Text("ऐसे बोलकर देखें:", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = KiranaTextSecondary)
+                    Text(tr("try_saying"), fontSize = 13.sp, fontWeight = FontWeight.Medium, color = KiranaTextSecondary)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SuggestionChip(text = "\"ग्राहक का ₹200 उधार\"", modifier = Modifier.weight(1f))
-                        SuggestionChip(text = "\"ग्राहक का जमा ₹500\"", modifier = Modifier.weight(1f))
+                        SuggestionChip(text = tr("chip_credit"), modifier = Modifier.weight(1f))
+                        SuggestionChip(text = tr("chip_payment"), modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -377,8 +446,8 @@ private fun PermissionNoticeCard(onRequestPermissions: () -> Unit) {
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("माइक्रोफ़ोन अनुमति आवश्यक है", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = KiranaBaakiRed)
-                Text("आवाज़ से हिसाब लिखने के लिए माइक चालू करें", fontSize = 11.sp, color = KiranaTextSecondary)
+                Text(tr("mic_perm_title"), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = KiranaBaakiRed)
+                Text(tr("mic_perm_body"), fontSize = 11.sp, color = KiranaTextSecondary)
             }
             Button(
                 onClick = onRequestPermissions,
@@ -386,7 +455,7 @@ private fun PermissionNoticeCard(onRequestPermissions: () -> Unit) {
                 colors = ButtonDefaults.buttonColors(containerColor = KiranaBaakiRed),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Text("अनुमति दें", fontSize = 12.sp, color = Color.White)
+                Text(tr("grant"), fontSize = 12.sp, color = Color.White)
             }
         }
     }

@@ -41,17 +41,29 @@ import java.io.FileOutputStream
 import java.util.UUID
 import com.vaada.network.KhataApiClient
 import com.vaada.network.MerchantAuthClient
+import com.vaada.config.ServerConfig
+import com.vaada.data.SessionStore
+import com.vaada.models.AppLanguage
+import com.vaada.models.LocalUiStrings
+import com.vaada.models.UiStrings
+import com.vaada.ui.language.LanguageSelectionScreen
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ServerConfig.init(applicationContext)
         setContent {
             VaadaTheme {
                 val context = LocalContext.current
+                val sessionStore = remember { SessionStore(context) }
+                var language by remember { mutableStateOf(sessionStore.language) }
+                var serverTick by remember { mutableStateOf(0) }
+                LaunchedEffect(language) { language?.let { VaadaAudioService.setLanguage(it.locale) } }
                 val assistantState by VaadaAudioService.assistantState.collectAsState()
                 val lastMetadata by VaadaAudioService.lastCapturedMetadata.collectAsState()
+                val turnView by VaadaAudioService.turnView.collectAsState()
                 val detectionCount by VaadaAudioService.wakeWordDetectionCount.collectAsState()
                 val lastScore by VaadaAudioService.lastWakeWordScore.collectAsState()
                 val threshold by VaadaAudioService.wakeWordThreshold.collectAsState()
@@ -82,7 +94,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // ── Auth state ────────────────────────────────────────────────
-                var authState: AuthState by remember { mutableStateOf(AuthState.Unauthenticated) }
+                var authState: AuthState by remember {
+                    mutableStateOf(if (sessionStore.loadToken() != null) AuthState.Restoring else AuthState.Unauthenticated)
+                }
                 var merchantProfile: MerchantProfile? by remember { mutableStateOf(null) }
                 var merchantToken by remember { mutableStateOf<String?>(null) }
                 var loginPin by remember { mutableStateOf("") }
@@ -140,6 +154,33 @@ class MainActivity : ComponentActivity() {
                 // ── Navigation state ──────────────────────────────────────────
                 var currentDestination by remember { mutableStateOf(VaadaDestination.Assistant) }
 
+                // After a successful login/registration/restore: pick language first unless one is saved.
+                fun afterSignIn() {
+                    authState = if (sessionStore.language != null) AuthState.Authenticated else AuthState.LanguageSelect()
+                    loadKhata()
+                }
+
+                // ── Restore a stored session: validate with GET /auth/me, never trust it blindly ──
+                LaunchedEffect(Unit) {
+                    if (authState is AuthState.Restoring) {
+                        val stored = sessionStore.loadToken()
+                        if (stored == null) { authState = AuthState.Unauthenticated; return@LaunchedEffect }
+                        try {
+                            val p = merchantAuthClient.getMe(stored)
+                            merchantToken = stored
+                            VaadaAudioService.setMerchantToken(stored)
+                            merchantProfile = MerchantProfile(p.userId.toString(), p.name, p.shopName, p.phone)
+                            afterSignIn()
+                        } catch (e: com.vaada.network.MerchantAuthException) {
+                            if (e.httpCode == 401 || e.httpCode == 403) sessionStore.clearToken()
+                            authState = AuthState.Unauthenticated
+                        } catch (e: Exception) {
+                            // Network down: keep the stored token for the next start, but do not enter the app unverified.
+                            authState = AuthState.Unauthenticated
+                        }
+                    }
+                }
+
                 // ── Voice auth: auto-proceed when verified ────────────────────
                 LaunchedEffect(voiceAuthSession, authState) {
                     if (authState is AuthState.VoiceVerify &&
@@ -153,7 +194,28 @@ class MainActivity : ComponentActivity() {
 
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
 
+                    CompositionLocalProvider(
+                        LocalUiStrings provides UiStrings.of(language ?: AppLanguage.ENGLISH),
+                        com.vaada.models.LocalAppLanguage provides (language ?: AppLanguage.ENGLISH)
+                    ) {
                     when (authState) {
+                        is AuthState.Restoring -> {
+                            androidx.compose.foundation.layout.Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                                androidx.compose.material3.CircularProgressIndicator()
+                            }
+                        }
+                        is AuthState.LanguageSelect -> {
+                            val ls = authState as AuthState.LanguageSelect
+                            LanguageSelectionScreen(
+                                initial = language,
+                                onConfirm = { chosen ->
+                                    sessionStore.language = chosen
+                                    language = chosen
+                                    authState = AuthState.Authenticated
+                                },
+                                onBack = if (ls.canGoBack) ({ authState = AuthState.Authenticated }) else null
+                            )
+                        }
                         // ── Auth screens ───────────────────────────────────────────
                         is AuthState.Unauthenticated -> {
                             WelcomeScreen(
@@ -189,8 +251,8 @@ class MainActivity : ComponentActivity() {
                                                 )
                                                 loginPin = ""
                                                 VaadaAudioService.resetVoiceAuth()
-                                                authState = AuthState.Authenticated
-                                                loadKhata()
+                                                sessionStore.saveToken(session.token)
+                                                afterSignIn()
                                             } catch (e: Exception) {
                                                 authState = (authState as? AuthState.PhoneEntry
                                                     ?: s).copy(
@@ -254,8 +316,8 @@ class MainActivity : ComponentActivity() {
                                                 )
                                                 signupPin = ""
                                                 VaadaAudioService.resetVoiceAuth()
-                                                authState = AuthState.Authenticated
-                                                loadKhata()
+                                                sessionStore.saveToken(session.token)
+                                                afterSignIn()
                                             } catch (e: Exception) {
                                                 authState = (authState as? AuthState.SignupEntry
                                                     ?: s).copy(
@@ -324,6 +386,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     VaadaAudioService.resetVoiceAuth()
                                     merchantToken = null
+                                    sessionStore.clearToken()
                                     VaadaAudioService.setMerchantToken(null)
                                     merchantProfile = null
                                     authState = AuthState.Unauthenticated
@@ -350,9 +413,14 @@ class MainActivity : ComponentActivity() {
                                     VaadaDestination.Assistant -> {
                                         HomeScreen(
                                             state = assistantState,
+                                            turn = turnView,
                                             hasPermissions = hasPermissions,
                                             lastMetadata = lastMetadata,
-                                            shopName = merchantProfile?.shopName ?: "आपकी दुकान",
+                                            shopName = merchantProfile?.shopName ?: LocalUiStrings.current.yourShop,
+                                            language = language ?: AppLanguage.ENGLISH,
+                                            onLanguageChange = { chosen -> sessionStore.language = chosen; language = chosen },
+                                            onReplay = { VaadaAudioService.replayLast(context) },
+                                            onRetry = { VaadaAudioService.retryLast(context) },
                                             onStartService = { VaadaAudioService.startService(context) },
                                             onStopService  = { VaadaAudioService.stopService(context) },
                                             onStartRecording = { VaadaAudioService.startRecording(context) },
@@ -385,6 +453,12 @@ class MainActivity : ComponentActivity() {
                                             merchantName       = merchantProfile?.merchantName ?: "",
                                             shopName           = merchantProfile?.shopName ?: "",
                                             phone              = merchantProfile?.phone ?: "",
+                                            language           = language ?: AppLanguage.ENGLISH,
+                                            onChangeLanguage   = { authState = AuthState.LanguageSelect(canGoBack = true) },
+                                            gatewayUrl         = ServerConfig.gatewayUrl,
+                                            ledgerUrl          = ServerConfig.ledgerUrl,
+                                            currentHost        = ServerConfig.currentHost,
+                                            onSaveHost         = { h -> ServerConfig.setHost(context, h).also { ok -> if (ok) serverTick++ } },
                                             onLogout           = {
                                                 val token = merchantToken
                                                 scope.launch {
@@ -394,6 +468,7 @@ class MainActivity : ComponentActivity() {
                                                         android.util.Log.w("MainActivity", "Merchant logout request failed", e)
                                                     } finally {
                                                         merchantToken = null
+                                                        sessionStore.clearToken()
                                     VaadaAudioService.setMerchantToken(null)
                                                         merchantProfile = null
                                                         loginPin = ""
@@ -409,6 +484,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

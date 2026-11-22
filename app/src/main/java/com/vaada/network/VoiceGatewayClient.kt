@@ -27,17 +27,28 @@ data class VoiceTurnResult(
     val ledgerBalancePaise: Long?,
     val duplicate: Boolean,
     val audioStatus: String,
-    val audioBase64: String?
+    val audioBase64: String?,
+    val pendingCustomer: String? = null,
+    val pendingAmountPaise: Long? = null,
+    val pendingType: String? = null,
+    val responseLanguage: String? = null
 )
 
 class VoiceGatewayException(
     val errorCode: String,
     message: String,
-    val recoverable: Boolean
+    val recoverable: Boolean,
+    /** The gateway's own sentence for this failure, already in the merchant's language (reply.text of the error envelope). */
+    val userMessage: String? = null,
+    val httpStatus: Int = 0
 ) : IOException(message)
 
+/** org.json turns JSON null into the STRING "null" with optString: this returns a real null instead. */
+private fun JSONObject.nullableString(name: String): String? =
+    if (!has(name) || isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
+
 class VoiceGatewayClient(
-    private val baseUrl: String = "http://10.115.28.169:8100"
+    private val baseUrl: String = com.vaada.config.ServerConfig.gatewayUrl
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -45,12 +56,27 @@ class VoiceGatewayClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /** POST /v1/voice/replay: the base64 WAV of this session's last reply (or null). Touches no ledger and no recogniser. */
+    suspend fun replay(sessionId: String, merchantToken: String): String? = withContext(Dispatchers.IO) {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("session_id", sessionId).build()
+        val request = Request.Builder()
+            .url("${baseUrl.trimEnd('/')}/v1/voice/replay")
+            .header("Authorization", "Bearer ${merchantToken.trim()}")
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@use null
+            val json = JSONObject(response.body?.string() ?: return@use null)
+            json.optJSONObject("audio")?.optString("data")?.takeIf { it.isNotBlank() && it != "null" }
+        }
+    }
+
     suspend fun sendTurn(
         audioFile: File,
         sessionId: String,
         merchantToken: String,
         clientMsgId: String = UUID.randomUUID().toString(),
-        language: String = "hi-IN,en-IN"
+        language: String
     ): VoiceTurnResult = withContext(Dispatchers.IO) {
         require(sessionId.matches(Regex("[A-Za-z0-9_-]{1,64}"))) {
             "Invalid session ID"
@@ -102,7 +128,9 @@ class VoiceGatewayClient(
                     errorCode = error?.optString("code", "HTTP_ERROR") ?: "HTTP_ERROR",
                     message = error?.optString("message", "Gateway request failed")
                         ?: "Gateway request failed",
-                    recoverable = error?.optBoolean("recoverable", false) ?: false
+                    recoverable = error?.optBoolean("recoverable", false) ?: false,
+                    userMessage = json.optJSONObject("reply")?.nullableString("text"),
+                    httpStatus = response.code
                 )
             }
 
@@ -132,8 +160,8 @@ class VoiceGatewayClient(
                 replyText = reply?.optString("text", "") ?: "",
                 replySpeak = speakList,
                 replyKind = reply?.optString("kind", "") ?: "",
-                dialogueState = dialogue?.optString("state"),
-                awaiting = dialogue?.optString("awaiting"),
+                dialogueState = dialogue?.nullableString("state"),
+                awaiting = dialogue?.nullableString("awaiting"),
                 ledgerCommitted = ledger?.optBoolean("committed", false) ?: false,
                 ledgerTransactionId = if (ledger != null && ledger.has("transaction_id")) {
                     ledger.optInt("transaction_id")
@@ -143,7 +171,11 @@ class VoiceGatewayClient(
                 } else null,
                 duplicate = json.optBoolean("duplicate", false),
                 audioStatus = audioStatus,
-                audioBase64 = audioBase64
+                audioBase64 = audioBase64,
+                pendingCustomer = dialogue?.optJSONObject("pending")?.nullableString("customer_name"),
+                pendingAmountPaise = dialogue?.optJSONObject("pending")?.let { if (it.isNull("amount_paise")) null else it.optLong("amount_paise") },
+                pendingType = dialogue?.optJSONObject("pending")?.nullableString("transaction_type"),
+                responseLanguage = json.nullableString("response_language")
             )
         }
     }

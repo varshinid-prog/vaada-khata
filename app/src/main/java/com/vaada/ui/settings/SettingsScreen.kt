@@ -39,6 +39,12 @@ fun SettingsScreen(
     shopName: String,
     phone: String,
     onLogout: () -> Unit,
+    language: com.vaada.models.AppLanguage,
+    onChangeLanguage: () -> Unit,
+    gatewayUrl: String,
+    ledgerUrl: String,
+    currentHost: String,
+    onSaveHost: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -130,13 +136,26 @@ fun SettingsScreen(
         }
 
         // ── Gateway Config ────────────────────────────────────────────────────
-        SectionCard(title = "Gateway") {
-            StatusRow(label = "Base URL", value = "http://10.115.28.169:8100")
-            StatusRow(label = "Endpoint", value = "POST /v1/voice/turn")
+        val ui = com.vaada.models.LocalUiStrings.current
+        SectionCard(title = ui.language) {
+            StatusRow(label = ui.language, value = "${language.nativeName} (${language.locale})")
+            androidx.compose.material3.OutlinedButton(onClick = onChangeLanguage) { Text(ui.changeLanguage) }
+        }
+
+        SectionCard(title = "Server") {
+            StatusRow(label = "Gateway", value = gatewayUrl)
+            StatusRow(label = "Ledger", value = ledgerUrl)
+            var hostText by androidx.compose.runtime.remember(currentHost) { androidx.compose.runtime.mutableStateOf(currentHost) }
+            var hostError by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+            androidx.compose.material3.OutlinedTextField(
+                value = hostText, onValueChange = { hostText = it; hostError = false },
+                label = { Text("Mac LAN IP / host") }, singleLine = true, isError = hostError,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+            )
+            androidx.compose.material3.OutlinedButton(onClick = { hostError = !onSaveHost(hostText) }) { Text("Save host") }
             Text(
-                text = "URL is configured in VoiceGatewayClient.kt. Contact the backend team to change it.",
-                fontSize = 11.sp,
-                color = KiranaTextMuted,
+                text = if (hostError) "Enter the Mac's LAN IP (not localhost)." else "Phone and Mac must be on the same Wi-Fi.",
+                fontSize = 11.sp, color = if (hostError) KiranaBaakiRed else KiranaTextMuted,
                 modifier = Modifier.padding(top = 6.dp)
             )
         }

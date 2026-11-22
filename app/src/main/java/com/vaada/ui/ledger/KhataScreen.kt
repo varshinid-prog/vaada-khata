@@ -1,5 +1,7 @@
 package com.vaada.ui.ledger
 
+import com.vaada.models.tr
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -63,7 +65,7 @@ fun KhataScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = KiranaGreenPrimary, modifier = Modifier.size(40.dp))
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("ग्राहक सूची लोड हो रही है...", style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
+                        Text(tr("list_loading"), style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
                     }
                 }
             }
@@ -110,8 +112,8 @@ fun KhataScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("ग्राहक सूची (Customers)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
-                        Text("${filtered.size} खाते", style = MaterialTheme.typography.labelSmall, color = KiranaTextMuted)
+                        Text(tr("customers_list"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
+                        Text(tr("n_accounts", filtered.size), style = MaterialTheme.typography.labelSmall, color = KiranaTextMuted)
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                 }
@@ -151,8 +153,8 @@ private fun KhataHeader() {
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("VAADA KHATA", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, color = KiranaGreenPrimary)
             }
-            Text("खाता (Khata)", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
-            Text("ग्राहक खाते (Customer accounts)", style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
+            Text(tr("khata_title"), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary)
+            Text(tr("customer_accounts"), style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
         }
     }
 }
@@ -165,7 +167,7 @@ private fun CustomerSearchBar(query: String, onQueryChange: (String) -> Unit) {
         value = query,
         onValueChange = onQueryChange,
         modifier = Modifier.fillMaxWidth().height(56.dp),
-        placeholder = { Text("ग्राहक का नाम या मोबाइल खोजें...", fontSize = 14.sp, color = KiranaTextMuted) },
+        placeholder = { Text(tr("search_ph"), fontSize = 14.sp, color = KiranaTextMuted) },
         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = KiranaGreenPrimary, modifier = Modifier.size(20.dp)) },
         trailingIcon = {
             if (query.isNotEmpty()) {
@@ -191,7 +193,7 @@ private fun SearchBarPlaceholder() {
         onValueChange = {},
         enabled = false,
         modifier = Modifier.fillMaxWidth().height(56.dp),
-        placeholder = { Text("ग्राहक का नाम या मोबाइल खोजें...", fontSize = 14.sp, color = KiranaTextMuted) },
+        placeholder = { Text(tr("search_ph"), fontSize = 14.sp, color = KiranaTextMuted) },
         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = KiranaTextMuted, modifier = Modifier.size(20.dp)) },
         singleLine = true,
         shape = RoundedCornerShape(16.dp),
@@ -214,15 +216,15 @@ private fun OutstandingSummaryCard(totalOutstanding: Double, owingCount: Int) {
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("कुल बकाया राशि (Total Outstanding)", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = KiranaMint)
+                Text(tr("total_outstanding"), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = KiranaMint)
                 Surface(shape = RoundedCornerShape(8.dp), color = KiranaGreenLight) {
-                    Text("$owingCount ग्राहक", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                    Text(tr("n_customers", owingCount), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text("₹${String.format("%.0f", totalOutstanding)}", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
             Spacer(modifier = Modifier.height(4.dp))
-            Text("दुकान का कुल बाज़ार उधार • समय पर वसूली करें", fontSize = 11.sp, color = KiranaMint.copy(alpha = 0.85f))
+            Text(tr("total_credit_sub"), fontSize = 11.sp, color = KiranaMint.copy(alpha = 0.85f))
         }
     }
 }
@@ -268,7 +270,7 @@ private fun CustomerCard(customer: CustomerAccount, onClick: () -> Unit) {
                 Spacer(modifier = Modifier.height(2.dp))
                 Surface(shape = RoundedCornerShape(6.dp), color = if (hasOutstanding) KiranaBaakiRedLight else KiranaJamaGreenLight) {
                     Text(
-                        text = if (hasOutstanding) "बाकी (Owes)" else "चुकता (Settled)",
+                        text = if (hasOutstanding) tr("owes") else tr("settled"),
                         fontSize = 10.sp, fontWeight = FontWeight.Bold,
                         color = if (hasOutstanding) KiranaBaakiRed else KiranaJamaGreen,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -287,9 +289,9 @@ private fun EmptyCustomersState() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("📒", fontSize = 48.sp)
             Spacer(modifier = Modifier.height(16.dp))
-            Text("अभी कोई ग्राहक नहीं है", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
+            Text(tr("no_customers"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
             Spacer(modifier = Modifier.height(8.dp))
-            Text("\"Hey Jarvis, रमेश का ₹200 उधार लिखो\" बोलकर पहला ग्राहक जोड़ें।", style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 32.dp))
+            Text(tr("empty_hint"), style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 32.dp))
         }
     }
 }
@@ -300,12 +302,12 @@ private fun EmptySearchState(searchQuery: String, onClearSearch: () -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Default.Search, contentDescription = null, tint = KiranaTextMuted, modifier = Modifier.size(48.dp))
             Spacer(modifier = Modifier.height(12.dp))
-            Text("\"$searchQuery\" नाम का कोई ग्राहक नहीं मिला", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = KiranaTextPrimary)
+            Text(tr("no_match", searchQuery), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = KiranaTextPrimary)
             Spacer(modifier = Modifier.height(4.dp))
-            Text("कृपया नाम या फ़ोन नंबर की जांच करें", style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
+            Text(tr("check_name"), style = MaterialTheme.typography.bodyMedium, color = KiranaTextSecondary)
             Spacer(modifier = Modifier.height(12.dp))
             TextButton(onClick = onClearSearch) {
-                Text("खोज साफ़ करें (Clear Search)", color = KiranaGreenPrimary, fontWeight = FontWeight.Bold)
+                Text(tr("clear_search"), color = KiranaGreenPrimary, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -317,10 +319,10 @@ private fun BackendUnavailableState(onRetry: () -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("🔌", fontSize = 48.sp)
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Backend Connected नहीं है", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
+            Text(tr("backend_off"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                "ग्राहक सूची और बाकी डेटा backend API से आएगा। अभी connection नहीं है।",
+                tr("backend_body"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = KiranaTextSecondary,
                 textAlign = TextAlign.Center
@@ -333,7 +335,7 @@ private fun BackendUnavailableState(onRetry: () -> Unit) {
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("फिर से कोशिश करें (Retry)", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(tr("retry"), color = Color.White, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -345,14 +347,14 @@ private fun ErrorState(message: String, onRetry: () -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("⚠️", fontSize = 48.sp)
             Spacer(modifier = Modifier.height(16.dp))
-            Text("कुछ गलत हुआ", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
+            Text(tr("went_wrong"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = KiranaTextPrimary, textAlign = TextAlign.Center)
             Spacer(modifier = Modifier.height(8.dp))
             Text(message, style = MaterialTheme.typography.bodyMedium, color = KiranaBaakiRed, textAlign = TextAlign.Center)
             Spacer(modifier = Modifier.height(20.dp))
             Button(onClick = onRetry, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = KiranaGreenPrimary)) {
                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("फिर से कोशिश करें", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(tr("retry"), color = Color.White, fontWeight = FontWeight.SemiBold)
             }
         }
     }
